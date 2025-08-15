@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tip Tracker · Offline · 3 Shifts (6/19 · 8/19 · 5/19)</title>
+  <style>
+    :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+    body { margin:0; background:#f7f7f9; }
+    .wrap { max-width: 960px; margin:0 auto; padding:16px; }
+    h1 { font-size:22px; margin:12px 0 8px; }
+    .card { background:#fff; border-radius:16px; padding:16px; box-shadow:0 6px 20px rgba(0,0,0,.06); margin-bottom:16px; }
+    label { display:block; font-size:14px; color:#444; margin:10px 0 6px; }
+    input, select, textarea { width:100%; font-size:16px; padding:12px; border:1px solid #ddd; border-radius:12px; background:#fff; box-sizing:border-box; }
+    .row { display:flex; gap:12px; }
+    .row > * { flex:1; }
+    .btn { display:inline-block; padding:14px 16px; border:none; border-radius:14px; font-weight:600; font-size:16px; cursor:pointer; }
+    .primary { background:#1e88e5; color:#fff; }
+    .ghost { background:#eef3fb; color:#1e3a8a; }
+    .toast { position:fixed; left:50%; transform:translateX(-50%); bottom:18px; background:#111; color:#fff; padding:10px 14px; border-radius:999px; opacity:0; transition:.25s; }
+    .toast.show{ opacity:1; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { text-align:left; padding:10px; border-bottom:1px solid #eee; font-size:14px; }
+    th { color:#666; font-weight:600; }
+    tfoot td { font-weight:700; }
+    .hint { color:#666; font-size:12px; }
+    .preview { background:#f7fafc; border-radius:12px; padding:12px; border:1px dashed #cbd5e1; }
+    @media (max-width:700px){ .row { flex-direction:column; } }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Tip Tracker · Offline (3 Shifts)</h1>
+  <div class="hint">Split rule: <strong>Morning 6/19</strong>, <strong>Mid 8/19</strong>, <strong>Evening 5/19</strong>. All data saved locally via IndexedDB. Export/Import JSON for backups.</div>
+
+  <div class="card">
+    <button class="btn ghost" id="exportJSON">Export JSON</button>
+    <button class="btn ghost" id="importJSON">Import JSON</button>
+    <button class="btn ghost" id="exportMonthCSV">Export This Month CSV</button>
+    <input id="filePicker" type="file" accept="application/json" style="display:none" />
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label>Date</label>
+        <input type="date" id="date" />
+      </div>
+      <div>
+        <label>Total Tip Amount (per day)</label>
+        <input type="number" id="total" inputmode="decimal" placeholder="0.00" step="0.01" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Morning (6/19)</label>
+        <select id="empMorning"></select>
+      </div>
+      <div>
+        <label>Mid (8/19)</label>
+        <select id="empMid"></select>
+      </div>
+      <div>
+        <label>Evening (5/19)</label>
+        <select id="empEvening"></select>
+      </div>
+    </div>
+
+    <label>Notes (optional)</label>
+    <textarea id="notes" placeholder="e.g., Sales, event, table notes..."></textarea>
+
+    <div class="preview" id="previewBox">Enter total and select employees to preview the split.</div>
+
+    <div class="row" style="margin-top:12px;">
+      <button class="btn primary" id="saveBtn">Save Split (3 records)</button>
+      <button class="btn ghost" id="clearBtn">Clear</button>
+    </div>
+    <div class="hint" id="backupHint"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between; align-items:center;">
+      <strong>Recent Records</strong>
+      <select id="limit">
+        <option value="20">20</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+        <option value="500">500</option>
+      </select>
+    </div>
+    <div style="overflow:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th><th>Date</th><th>Shift</th><th>Employee</th><th>Amount</th><th>Notes</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+        <tfoot>
+          <tr><td colspan="4">Total</td><td id="sum"></td><td></td></tr>
+        </tfoot>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between; align-items:center;">
+      <strong>Totals by Employee</strong>
+      <button class="btn ghost" id="refreshStats">Refresh</button>
+    </div>
+    <div style="overflow:auto;">
+      <table>
+        <thead>
+          <tr><th>Employee</th><th>Total Amount</th><th>Count</th></tr>
+        </thead>
+        <tbody id="statsBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ========================
+// Employee list (edit as needed)
+// ========================
+const EMPLOYEES = [
+  'Yinan Xu','Xinyi Zhang','Wenjie Lin','Wang Li','Stephanie Sun','Lin',
+  'Joe','Jin Xu','Jason Li','Jackie Mei','Jack Wang','Anh Truing'
+];
+
+// ========================
+// IndexedDB wrapper
+// ========================
+const DB_NAME = 'tip_offline_db';
+const DB_VER  = 3; // version for 3-shift schema
+const STORE   = 'records';
+const META    = 'meta';
+
+function idbOpen(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(DB_NAME, DB_VER);
+    req.onupgradeneeded = ()=>{
+      const db = req.result;
+      if(!db.objectStoreNames.contains(STORE)){
+        db.createObjectStore(STORE, { keyPath:'id', autoIncrement:true });
+      }
+      if(!db.objectStoreNames.contains(META)){
+        db.createObjectStore(META, { keyPath:'k' });
+      }
+    };
+    req.onsuccess = ()=> resolve(req.result);
+    req.onerror   = ()=> reject(req.error);
+  });
+}
+
+async function idbAdd(obj){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).add(obj);
+    tx.oncomplete = ()=> resolve(true);
+    tx.onerror = ()=> reject(tx.error);
+  });
+}
+
+async function idbAll(limit=100){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(STORE, 'readonly');
+    const store = tx.objectStore(STORE);
+    const req = store.openCursor(null, 'prev');
+    const arr = [];
+    req.onsuccess = ()=>{
+      const cur = req.result;
+      if(cur && arr.length < limit){ arr.push(cur.value); cur.continue(); }
+      else resolve(arr.reverse());
+    };
+    req.onerror = ()=> reject(req.error);
+  });
+}
+
+async function idbAllNoLimit(){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(STORE, 'readonly');
+    const store = tx.objectStore(STORE);
+    const req = store.openCursor(null, 'next');
+    const arr = [];
+    req.onsuccess = ()=>{
+      const cur = req.result;
+      if(cur){ arr.push(cur.value); cur.continue(); }
+      else resolve(arr);
+    };
+    req.onerror = ()=> reject(req.error);
+  });
+}
+
+async function idbExport(){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction([STORE, META], 'readonly');
+    const s = tx.objectStore(STORE).getAll();
+    const m = tx.objectStore(META).getAll();
+    tx.oncomplete = ()=> resolve({ records: s.result||[], meta: m.result||[] });
+    tx.onerror = ()=> reject(tx.error);
+  });
+}
+
+async function idbImport(payload){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction([STORE, META], 'readwrite');
+    const s = tx.objectStore(STORE); const m = tx.objectStore(META);
+    s.clear(); m.clear();
+    (payload.records||[]).forEach(r=> s.add(r));
+    (payload.meta||[]).forEach(x=> m.add(x));
+    tx.oncomplete = ()=> resolve(true);
+    tx.onerror = ()=> reject(tx.error);
+  });
+}
+
+async function metaSet(k,v){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(META, 'readwrite');
+    tx.objectStore(META).put({k,v});
+    tx.oncomplete = ()=> resolve(true);
+    tx.onerror = ()=> reject(tx.error);
+  });
+}
+async function metaGet(k){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(META, 'readonly');
+    const req = tx.objectStore(META).get(k);
+    req.onsuccess = ()=> resolve(req.result ? req.result.v : null);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+
+// ========================
+// UI helpers
+// ========================
+const $ = s=> document.querySelector(s);
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1400); }
+function todayStr(){ const d=new Date(); const mm=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); return `${d.getFullYear()}-${mm}-${dd}`; }
+function csvEscape(s){ return '"'+String(s).replaceAll('"','""')+'"'; }
+
+// Split allocator in cents, ensures exact sum equals total
+const R_M = 6, R_MD = 8, R_E = 5, DEN = 19; // Morning/Mid/Evening
+function splitCents(totalCents){
+  const baseM  = Math.floor(totalCents * R_M  / DEN);
+  const baseMD = Math.floor(totalCents * R_MD / DEN);
+  const baseE  = Math.floor(totalCents * R_E  / DEN);
+  let sum = baseM + baseMD + baseE;
+  let rem = totalCents - sum; // distribute remainder to the larger ratios first: mid -> morning -> evening
+  let m = baseM, md = baseMD, e = baseE;
+  const order = ['md','m','e'];
+  while(rem > 0){
+    const k = order[(rem-1)%order.length];
+    if(k==='md') md++; else if(k==='m') m++; else e++;
+    rem--;
+  }
+  return { m, md, e };
+}
+
+function cents(n){ return Math.round(n*100); }
+function asMoney(c){ return (c/100).toFixed(2); }
+
+function updatePreview(){
+  const total = parseFloat($('#total').value||'0');
+  const empM = $('#empMorning').value, empMD = $('#empMid').value, empE = $('#empEvening').value;
+  if(!total || !empM || !empMD || !empE){
+    $('#previewBox').innerHTML = 'Enter total and select all three employees to see the preview.';
+    return;
+  }
+  const parts = splitCents(cents(total));
+  $('#previewBox').innerHTML = `Split preview → Morning (<b>${empM}</b>): <b>$${asMoney(parts.m)}</b> · Mid (<b>${empMD}</b>): <b>$${asMoney(parts.md)}</b> · Evening (<b>${empE}</b>): <b>$${asMoney(parts.e)}</b>`;
+}
+
+async function saveSplit(){
+  const date = $('#date').value || todayStr();
+  const total = parseFloat($('#total').value||'0');
+  const notes = $('#notes').value.trim();
+  const empM = $('#empMorning').value, empMD = $('#empMid').value, empE = $('#empEvening').value;
+  if(!empM || !empMD || !empE){ toast('Please select all three employees.'); return; }
+  if(!total){ toast('Please enter the total tip amount.'); return; }
+
+  const p = splitCents(cents(total));
+  const now = Date.now();
+  const records = [
+    { ts: now, date, shift:'Morning', employee: empM,  amount: p.m/100,  notes },
+    { ts: now, date, shift:'Mid',     employee: empMD, amount: p.md/100, notes },
+    { ts: now, date, shift:'Evening', employee: empE,  amount: p.e/100,  notes }
+  ];
+  for(const r of records){ await idbAdd(r); }
+  $('#notes').value=''; $('#total').value='';
+  await loadList(); await loadStats(); updatePreview();
+  toast('Saved 3 records.');
+  await metaSet('lastSaveAt', Date.now());
+}
+
+async function loadList(){
+  const limit = parseInt($('#limit').value,10)||20;
+  const rows = await idbAll(limit);
+  let html=''; let total=0;
+  for(const r of rows){
+    const dt = r.ts ? new Date(r.ts) : null;
+    total += Number(r.amount)||0;
+    html += `<tr>
+      <td>${dt?dt.toLocaleString():''}</td>
+      <td>${r.date||''}</td>
+      <td>${r.shift||''}</td>
+      <td>${r.employee||''}</td>
+      <td>${(Number(r.amount)||0).toFixed(2)}</td>
+      <td>${(r.notes||'').replace(/</g,'&lt;')}</td>
+    </tr>`;
+  }
+  $('#tbody').innerHTML = html;
+  $('#sum').textContent = total.toFixed(2);
+}
+
+async function loadStats(){
+  const all = await idbAllNoLimit();
+  const map = new Map();
+  for(const name of EMPLOYEES){ map.set(name, {sum:0, count:0}); }
+  for(const r of all){
+    const name = r.employee || 'Unassigned';
+    if(!map.has(name)) map.set(name, {sum:0, count:0});
+    const x = map.get(name); x.sum += Number(r.amount)||0; x.count += 1;
+  }
+  const arr = Array.from(map.entries()).map(([name,v])=>({name, ...v})).sort((a,b)=> b.sum - a.sum);
+  let html='';
+  for(const it of arr){ html += `<tr><td>${it.name}</td><td>${it.sum.toFixed(2)}</td><td>${it.count}</td></tr>`; }
+  $('#statsBody').innerHTML = html;
+}
+
+async function exportJSON(){
+  const payload = await idbExport();
+  const blob = new Blob([JSON.stringify(payload)], {type:'application/json;charset=utf-8;'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'tip_backup.json'; a.click(); URL.revokeObjectURL(a.href);
+  toast('JSON exported'); await metaSet('lastBackupAt', Date.now()); updateBackupHint();
+}
+async function importJSON(file){
+  const text = await file.text(); const obj = JSON.parse(text); await idbImport(obj); toast('JSON imported'); await loadList(); await loadStats(); updatePreview(); }
+
+function exportMonthCSV(){
+  const now=new Date(); const y=now.getFullYear(); const m=now.getMonth();
+  idbExport().then(({records})=>{
+    const rows = (records||[]).filter(r=>{ const d=new Date(r.ts||Date.now()); return d.getFullYear()===y && d.getMonth()===m; });
+    let csv='Timestamp,Date,Shift,Employee,Amount,Notes\n';
+    for(const r of rows){
+      const dt = r.ts? new Date(r.ts).toISOString():'';
+      csv += [dt, r.date||'', r.shift||'', r.employee||'', Number(r.amount)||0, (r.notes||'').replaceAll('\n',' ')].map(csvEscape).join(',')+'\n';
+    }
+    const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`tips_${y}-${String(m+1).padStart(2,'0')}.csv`; a.click(); URL.revokeObjectURL(a.href); toast('CSV exported');
+  });
+}
+
+async function updateBackupHint(){
+  const last = await metaGet('lastBackupAt');
+  if(!last){ $('#backupHint').textContent = 'No backup found yet — consider exporting a JSON backup.'; return; }
+  const days = Math.floor((Date.now() - last)/86400000);
+  $('#backupHint').textContent = days>=7 ? `⚠️ It has been ${days} days since last backup. Consider exporting JSON.` : `Last backup: ${new Date(last).toLocaleString()}`;
+}
+
+function fillEmployeeSelects(){
+  const opts = ['<option value="">Select…</option>'].concat(EMPLOYEES.map(n=>`<option>${n}</option>`)).join('');
+  $('#empMorning').innerHTML = opts; $('#empMid').innerHTML = opts; $('#empEvening').innerHTML = opts;
+}
+
+// ===== init =====
+(async function(){
+  fillEmployeeSelects();
+  $('#date').value = todayStr();
+  $('#saveBtn').addEventListener('click', saveSplit);
+  $('#clearBtn').addEventListener('click', ()=>{ $('#total').value=''; $('#notes').value=''; updatePreview(); });
+  $('#limit').addEventListener('change', loadList);
+  $('#exportJSON').addEventListener('click', exportJSON);
+  $('#importJSON').addEventListener('click', ()=> $('#filePicker').click());
+  $('#filePicker').addEventListener('change', async ()=>{ const f=$('#filePicker').files[0]; if(f){ try{ await importJSON(f); }catch(e){ alert('Invalid JSON'); } $('#filePicker').value=''; } });
+  $('#refreshStats').addEventListener('click', loadStats);
+  $('#total').addEventListener('input', updatePreview);
+  $('#empMorning').addEventListener('change', updatePreview);
+  $('#empMid').addEventListener('change', updatePreview);
+  $('#empEvening').addEventListener('change', updatePreview);
+
+  await loadList();
+  await loadStats();
+  await updateBackupHint();
+})();
+</script>
+</body>
+</html>
